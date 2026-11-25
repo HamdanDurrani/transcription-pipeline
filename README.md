@@ -13,7 +13,7 @@ Client
   │  POST /transcribe  (multipart audio)
   ▼
 ┌─────────────────────┐
-│  FastAPI (app/)     │  validate format + size
+│  FastAPI (app/)     │  validate format + stream size check
 │  api/routes.py      │  persist upload to temp file
 └──────────┬──────────┘
            │ run_in_threadpool
@@ -33,7 +33,7 @@ Client
 
 ### Request flow
 
-1. **Validate** — reject unsupported extensions and files over 200 MB.
+1. **Validate** — reject unsupported extensions; stream the upload and abort over 200 MB mid-write.
 2. **Probe** — `ffprobe` confirms the file is readable and returns duration.
 3. **Chunk** — long audio is split into 10-minute windows with a 5-second overlap so memory stays bounded and word boundaries are not lost at cuts.
 4. **Normalize** — each window is converted to 16 kHz mono WAV (Whisper’s expected input).
@@ -48,24 +48,35 @@ Client
 ```
 transcription-pipeline/
 ├── app/
-│   ├── main.py                 # FastAPI entrypoint, health check
-│   ├── config.py               # env-driven settings & limits
+│   ├── main.py                 # app factory, lifespan, /health + /ready
+│   ├── config/
+│   │   └── settings.py         # pydantic-settings (env optional)
+│   ├── core/
+│   │   ├── logging.py          # structured stdout logging
+│   │   └── exceptions.py       # domain errors
 │   ├── api/
 │   │   └── routes.py           # HTTP handlers
 │   ├── services/
 │   │   └── transcription.py    # ffmpeg + Whisper pipeline
 │   └── schemas/
-│       └── transcript.py       # response models
+│       ├── transcript.py       # response models
+│       └── errors.py           # error body
+├── tests/                      # API + unit tests (mocked inference)
+├── Dockerfile
+├── docker-compose.yml
+├── Makefile
+├── .env.example
 ├── requirements.txt
-└── README.md
+└── requirements-dev.txt
 ```
 
 | Layer | Responsibility |
 |-------|----------------|
-| `api/` | HTTP concerns only — upload handling, status codes, response format |
+| `api/` | HTTP concerns — upload streaming, status codes, response format |
 | `services/` | Domain logic — probing, conversion, inference, SRT rendering |
 | `schemas/` | Typed contracts returned to clients |
-| `config.py` | Tunables (`WHISPER_MODEL`, chunk size, upload cap) |
+| `core/` | Logging + domain exceptions |
+| `config/` | Tunables via env (with safe defaults; `.env` not required) |
 
 ---
 
@@ -87,25 +98,34 @@ sudo apt install ffmpeg
 ## Setup
 
 ```bash
-python -m venv .venv
+make install-dev
+# or
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
-Optional environment variables:
+Configuration is optional. Defaults work with no `.env`:
+
+```bash
+cp .env.example .env   # only if you want to override
+```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WHISPER_MODEL` | `small` | Model size (`tiny`, `base`, `small`, `medium`, …) |
 | `WHISPER_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `WHISPER_COMPUTE_TYPE` | `int8` | Quantization / precision for inference |
+| `LOG_LEVEL` | `INFO` | Python log level |
 
 ---
 
 ## Run the API
 
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+make run
+# or
+.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Interactive docs: [http://localhost:8000/docs](http://localhost:8000/docs)
@@ -119,8 +139,9 @@ curl -F "file=@sample.mp3" http://localhost:8000/transcribe
 # SRT subtitles
 curl -F "file=@sample.mp3" "http://localhost:8000/transcribe?format=srt"
 
-# Health check
+# Ops probes
 curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
 
 ### Example JSON response
@@ -147,6 +168,30 @@ python -m app.services.transcription sample.mp3
 
 ---
 
+## Tests
+
+```bash
+make test
+# or
+.venv/bin/pytest -q
+```
+
+Coverage includes health/ready probes, SRT formatting, upload validation, and the `/transcribe` happy path with Whisper mocked (no model download required for CI).
+
+---
+
+## Docker
+
+```bash
+docker compose up --build
+# or
+make docker-up
+```
+
+Image installs `ffmpeg`, runs uvicorn on port 8000, and caches Whisper weights in a named volume.
+
+---
+
 ## API reference
 
 ### `POST /transcribe`
@@ -162,10 +207,15 @@ python -m app.services.transcription sample.mp3
 | `413` | File exceeds 200 MB |
 | `415` | Unsupported media type |
 | `422` | Corrupt / unreadable audio |
+| `500` | Unexpected server error |
 
 ### `GET /health`
 
 Liveness probe — returns `{"status": "ok"}`.
+
+### `GET /ready`
+
+Readiness probe — verifies `ffmpeg` / `ffprobe` are on `PATH`. Returns `503` if missing. Does **not** load the Whisper model.
 
 ---
 
@@ -179,8 +229,10 @@ Liveness probe — returns `{"status": "ok"}`.
 | **VAD enabled** | Skips silence before inference — shorter effective audio, fewer empty segments, lower cost per request. |
 | **Language lock after first chunk** | Avoids language flicker across chunks on the same recording. |
 | **`run_in_threadpool`** | Whisper is CPU-bound; offloading keeps the FastAPI event loop free for health checks and concurrent accepts. |
-| **Layered package (`api` / `services` / `schemas`)** | HTTP, domain logic, and response contracts stay separable — easier to test and swap backends later. |
+| **Streamed upload size check** | Reject oversized bodies while writing, not after the full file hits disk. |
+| **`/health` vs `/ready`** | Liveness stays cheap; readiness checks media binaries without loading the model. |
+| **pydantic-settings + `.env.example`** | Config is explicit and overridable, but the service runs with zero env setup. |
 | **Lazy model singleton** | Model load is expensive; one instance per process amortizes startup cost across requests. |
 | **Temp-file lifecycle** | Uploads and chunk WAVs never persist past the request; reduces disk leak risk under load. |
 | **JSON + SRT** | JSON for product/API consumers; SRT for editors and subtitle workflows without a second service. |
-| **200 MB upload cap + extension allowlist** | Cheap abuse guardrails before any heavy decode/inference work. |
+| **Layered package (`api` / `services` / `schemas` / `core`)** | HTTP, domain logic, and contracts stay separable — easier to test and swap backends later. |

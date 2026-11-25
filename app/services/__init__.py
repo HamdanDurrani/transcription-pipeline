@@ -1,3 +1,3 @@
-from app.services.transcription import TranscriptionService, to_srt
+from app.services.transcription import TranscriptionService, get_transcription_service, to_srt
 
-__all__ = ["TranscriptionService", "to_srt"]
+__all__ = ["TranscriptionService", "get_transcription_service", "to_srt"]
