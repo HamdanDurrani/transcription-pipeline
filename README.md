@@ -114,8 +114,10 @@ cp .env.example .env   # only if you want to override
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WHISPER_MODEL` | `small` | Model size (`tiny`, `base`, `small`, `medium`, …) |
-| `WHISPER_DEVICE` | `cpu` | `cpu` or `cuda` |
-| `WHISPER_COMPUTE_TYPE` | `int8` | Quantization / precision for inference |
+| `WHISPER_DEVICE` | `mps` on Apple Silicon, else `cpu` | `cpu`, `mps` (Apple GPU), or `cuda` |
+| `WHISPER_COMPUTE_TYPE` | `float16` on MPS, else `int8` | Precision for inference |
+
+On Apple Silicon, CTranslate2’s **MPS (Metal)** backend is used by default so transcription runs on the Mac GPU. It is still marked experimental upstream, but is typically much faster than CPU. Override with `WHISPER_DEVICE=cpu` if needed.
 | `LOG_LEVEL` | `INFO` | Python log level |
 
 ---

@@ -4,10 +4,12 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
 
 from app.api import api_router
 from app.config import get_settings
 from app.core.logging import setup_logging
+from app.services.transcription import get_transcription_service
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,9 @@ async def lifespan(_app: FastAPI):
         settings.whisper_model,
         settings.whisper_device,
     )
+    # Warm the model at boot so the first /transcribe is not a cold start
+    await run_in_threadpool(get_transcription_service)
+    logger.info("Model warm-up complete")
     yield
     logger.info("Shutting down %s", settings.app_name)
 
@@ -48,21 +53,21 @@ def create_app() -> FastAPI:
 
     @application.get("/ready", tags=["ops"])
     async def ready() -> dict[str, str]:
-        """
-        Readiness probe — ffmpeg/ffprobe available.
-
-        Does not load the Whisper model (that happens on first /transcribe).
-        """
+        """Readiness probe — ffmpeg/ffprobe available and model loaded."""
         import shutil
+
+        from fastapi import HTTPException
+
+        from app.services.transcription import is_model_ready
 
         missing = [bin_ for bin_ in ("ffmpeg", "ffprobe") if shutil.which(bin_) is None]
         if missing:
-            from fastapi import HTTPException
-
             raise HTTPException(
                 status_code=503,
                 detail=f"Missing dependencies: {', '.join(missing)}",
             )
+        if not is_model_ready():
+            raise HTTPException(status_code=503, detail="Model not loaded yet")
         return {"status": "ready"}
 
     return application

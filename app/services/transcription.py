@@ -166,6 +166,10 @@ def get_transcription_service() -> TranscriptionService:
     return _service
 
 
+def is_model_ready() -> bool:
+    return _service is not None
+
+
 def reset_transcription_service() -> None:
     """Test helper to clear the singleton between cases."""
     global _service

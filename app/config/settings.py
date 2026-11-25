@@ -1,6 +1,24 @@
+from __future__ import annotations
+
+import platform
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_whisper_device() -> str:
+    # Apple Silicon can use the experimental Metal (MPS) backend
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        return "mps"
+    return "cpu"
+
+
+def _default_whisper_compute_type() -> str:
+    # MPS has no fast native INT8 path; float16 is the practical default there
+    if _default_whisper_device() == "mps":
+        return "float16"
+    return "int8"
 
 
 class Settings(BaseSettings):
@@ -18,8 +36,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     whisper_model: str = "small"
-    whisper_device: str = "cpu"
-    whisper_compute_type: str = "int8"
+    whisper_device: str = Field(default_factory=_default_whisper_device)
+    whisper_compute_type: str = Field(default_factory=_default_whisper_compute_type)
 
     chunk_seconds: int = 600
     overlap_seconds: int = 5
